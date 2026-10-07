@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Push Up">
+  <meta name="theme-color" content="#000000">
+  <title>Push Up</title>
+  <script>if (location.protocol === 'http:') location.replace('https:' + location.href.slice(5));</script>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" href="icon.png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="stage">
+    <video id="video" playsinline muted autoplay></video>
+    <canvas id="overlay"></canvas>
+  </div>
+
+  <div id="hud">
+    <div id="count">0</div>
+    <div id="status"></div>
+  </div>
+
+  <div id="start-screen">
+    <button id="start">Старт</button>
+    <p id="start-msg"></p>
+  </div>
+
+  <div id="bar">
+    <div class="seg" id="signal-switch">
+      <button data-signal="a">a: плечи ↕</button>
+      <button data-signal="b">b: масштаб</button>
+    </div>
+    <div class="row">
+      <button id="new-set">Новый подход</button>
+      <button id="copy-log">Скопировать лог</button>
+      <button id="share-log">Поделиться</button>
+      <button id="toggle-debug">Debug</button>
+    </div>
+  </div>
+
+  <div id="debug" hidden>
+    <div id="debug-stats"></div>
+    <canvas id="graph"></canvas>
+    <div class="row">
+      <button id="cal-auto">Авто</button>
+      <button id="cal-top">Верх (3с)</button>
+      <button id="cal-bottom">Низ (3с)</button>
+      <label><input type="checkbox" id="invert"> инверт</label>
+    </div>
+    <div id="sliders"></div>
+  </div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
