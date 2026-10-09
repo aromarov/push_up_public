@@ -15,6 +15,7 @@ export const DEFAULTS = {
   maxDepth: 1.6,    // глубже — не отжимание (лёг, встал, ушёл из кадра)
   dwellMs: 80,      // сколько держать за порогом, чтобы сменить состояние
   minRepMs: 300,    // повтор короче не засчитывается
+  maxRepMs: 4000,   // «внизу» дольше — не повтор (встал, пошёл к телефону); у реальных 0.5–1.8 с
   maxBadMs: 700,    // мусор дольше этого внутри повтора — повтор не засчитывается
   emaAlpha: 0.5,
   topWindowMs: 10000, // окно, по которому ищем «верх» (p80)
@@ -82,7 +83,8 @@ export class DepthCounter {
     }
     this.state = 'up';
     const depth = this.maxD; this.maxD = 0;
-    if (t - this.downAt < s.minRepMs || depth > s.maxDepth || this.badMs > s.maxBadMs) return null;
+    const dur = t - this.downAt;
+    if (dur < s.minRepMs || dur > s.maxRepMs || depth > s.maxDepth || this.badMs > s.maxBadMs) return null;
     this.count++;
     return 'rep';
   }

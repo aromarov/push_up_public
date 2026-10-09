@@ -18,6 +18,11 @@ button.on { background: #1f6feb; }
   object-fit: contain; transform: scaleX(-1);
 }
 
+#frame { position: fixed; inset: 0; pointer-events: none; border: 0 solid transparent; transition: border-color .2s; }
+#frame.ok { border-width: 10px; border-color: #3fb950; }
+#frame.bad { border-width: 14px; border-color: #f0883e; animation: blink 1s infinite; }
+@keyframes blink { 50% { border-color: rgba(240,136,62,.35); } }
+
 #hud {
   position: fixed; left: 0; right: 0; top: env(safe-area-inset-top); text-align: center;
   pointer-events: none; text-shadow: 0 2px 8px #000;

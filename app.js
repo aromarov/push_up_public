@@ -1,7 +1,7 @@
 import { PoseLandmarker } from './vendor/mediapipe/vision_bundle.mjs';
 import { LOG_POINTS, DEFAULTS, FRAME_HINT, DepthCounter, frameHint } from './counter.js';
 
-const APP_VERSION = '0.2.0';
+const APP_VERSION = '0.2.1';
 const GRAPH_MS = 10000;
 const LOG_MAX_FRAMES = 30 * 60 * 20;
 
@@ -145,6 +145,8 @@ function processFrame(t, lm, W, H) {
   const d = last?.d ?? null;
   // Подсказку по расстоянию даём только в верхней точке: внизу плечи всегда шире.
   if (last?.ok && (d == null || d < settings.upDepth)) hint = frameHint(last.sw);
+  // Рамка по краю экрана: оранжевая — телефон не там, зелёная — ок (только до первого повтора, потом не мешает).
+  $('frame').className = hint && hint !== 'ok' ? 'bad' : hint === 'ok' && counter.count === 0 ? 'ok' : '';
   history.push({ t, d, st: counter.state });
   while (history.length && t - history[0].t > GRAPH_MS) history.shift();
 
@@ -157,7 +159,8 @@ function processFrame(t, lm, W, H) {
     logEvent('half');
   }
   setStatus(!lm ? 'Не вижу тебя' : !last?.ok ? 'Не вижу плечи' : d == null ? 'Встань в упор…'
-    : hint === 'far' ? 'Отодвинь телефон дальше от лица' : hint === 'near' ? 'Придвинь телефон ближе' : '');
+    : hint === 'far' ? '↕ Отодвинь телефон дальше от лица' : hint === 'near' ? '↕ Придвинь телефон ближе'
+    : counter.count === 0 ? 'Телефон стоит ок, погнали' : '');
 
   if (log.frames.length < LOG_MAX_FRAMES) {
     log.frames.push({
@@ -180,7 +183,6 @@ function drawSkeleton(lm) {
   const W = video.videoWidth, H = video.videoHeight;
   if (overlay.width !== W || overlay.height !== H) { overlay.width = W; overlay.height = H; }
   octx.clearRect(0, 0, W, H);
-  drawFrameHint(W, H);
   if (!lm) return;
   octx.lineWidth = Math.max(2, W / 200);
   octx.strokeStyle = '#3fb950';
@@ -199,17 +201,6 @@ function drawSkeleton(lm) {
     octx.arc(pt.x * W, pt.y * H, octx.lineWidth * 1.5, 0, Math.PI * 2);
     octx.fill();
   }
-}
-
-// Рамка «плечи сюда» в верхней точке: ширина — середина целевого диапазона ширины плеч.
-function drawFrameHint(W, H) {
-  const w = W * (FRAME_HINT.minSw + FRAME_HINT.maxSw) / 2;
-  octx.save();
-  octx.setLineDash([W / 40, W / 60]);
-  octx.lineWidth = Math.max(2, W / 150);
-  octx.strokeStyle = hint === 'ok' ? 'rgba(63,185,80,.9)' : hint ? 'rgba(240,136,62,.9)' : 'rgba(255,255,255,.5)';
-  octx.strokeRect((W - w) / 2, H * 0.3, w, H * 0.3);
-  octx.restore();
 }
 
 function drawGraph(tNow) {
