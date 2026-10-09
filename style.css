@@ -22,6 +22,16 @@ button.on { background: #1f6feb; }
 #frame.ok { border-width: 10px; border-color: #3fb950; }
 #frame.bad { border-width: 10px; border-color: rgba(240,136,62,.8); }
 
+/* Полоска глубины: заполняется сверху вниз, жёлтая после порога половинки, зелёная после порога повтора. */
+#depth {
+  position: fixed; right: 14px; top: 28%; height: 40%; width: 18px; pointer-events: none;
+  background: rgba(255,255,255,.12); border-radius: 9px; overflow: hidden;
+}
+#depth-fill { position: absolute; left: 0; right: 0; top: 0; height: 0; background: #8b949e; }
+#depth-fill.half { background: #d29922; }
+#depth-fill.full { background: #3fb950; }
+#depth .mark { position: absolute; left: 0; right: 0; height: 2px; background: rgba(255,255,255,.8); }
+
 #hud {
   position: fixed; left: 0; right: 0; top: env(safe-area-inset-top); text-align: center;
   pointer-events: none; text-shadow: 0 2px 8px #000;

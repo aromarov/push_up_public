@@ -1,7 +1,7 @@
 import { PoseLandmarker } from './vendor/mediapipe/vision_bundle.mjs';
 import { LOG_POINTS, DEFAULTS, FRAME_HINT, DepthCounter, frameHint } from './counter.js';
 
-const APP_VERSION = '0.3.1';
+const APP_VERSION = '0.3.2';
 const COUNTDOWN_MS = 8000;
 const GRAPH_MS = 10000;
 const LOG_MAX_FRAMES = 30 * 60 * 20;
@@ -185,6 +185,7 @@ function processFrame(t, lm, W, H) {
   if (last?.ok && (d == null || d < settings.upDepth)) hint = frameHint(last.sw);
   // Рамка по краю экрана: оранжевая — телефон не там, зелёная — ок (только до первого повтора, потом не мешает).
   $('frame').className = hint && hint !== 'ok' ? 'bad' : hint === 'ok' && counter.count === 0 ? 'ok' : '';
+  renderDepth(d);
   history.push({ t, d, st: counter.state });
   while (history.length && t - history[0].t > GRAPH_MS) history.shift();
 
@@ -284,6 +285,18 @@ function renderStats() {
   ].join('\n');
 }
 const fmt = (x) => (x == null ? '—' : x.toFixed(3));
+
+// Шкала: верх полоски = 0, низ = 1.3 ширины плеч (глубже реальных повторов не бывает).
+const DEPTH_SCALE = 1.3;
+function renderDepth(d) {
+  const pct = (x) => Math.max(0, Math.min(100, (x / DEPTH_SCALE) * 100)) + '%';
+  const fill = $('depth-fill');
+  fill.style.height = pct(d ?? 0);
+  // В состоянии «низ» повтор уже набран — держим зелёный до возврата наверх.
+  fill.className = counter.state === 'down' ? 'full' : d != null && d >= settings.halfDepth ? 'half' : '';
+  $('mark-half').style.top = pct(settings.halfDepth);
+  $('mark-down').style.top = pct(settings.downDepth);
+}
 
 function renderCount(flash = false) {
   const el = $('count');
