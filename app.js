@@ -1,7 +1,8 @@
 import { PoseLandmarker } from './vendor/mediapipe/vision_bundle.mjs';
 import { LOG_POINTS, DEFAULTS, FRAME_HINT, DepthCounter, frameHint } from './counter.js';
 
-const APP_VERSION = '0.2.2';
+const APP_VERSION = '0.3.0';
+const COUNTDOWN_MS = 8000;
 const GRAPH_MS = 10000;
 const LOG_MAX_FRAMES = 30 * 60 * 20;
 
@@ -13,6 +14,7 @@ const settings = loadSettings();
 let landmarker = null, delegateUsed = null, audioCtx = null, wakeLock = null;
 let running = false, lastVideoTime = -1, t0 = 0;
 let counter, history, log, hint = null;
+let goAt = 0, counting = false, modelMs = null;
 let fps = 0, fpsFrames = 0, fpsT = 0;
 
 function loadSettings() {
@@ -30,6 +32,15 @@ function showMsg(text) { $('status').textContent = text; msgUntil = performance.
 
 // ---------- старт ----------
 
+// Модель грузим сразу при открытии страницы: пока жмёшь «Старт», даёшь камеру и встаёшь — она готовится.
+const pageT0 = performance.now();
+const landmarkerPromise = createLandmarker().then((l) => {
+  landmarker = l;
+  modelMs = Math.round(performance.now() - pageT0);
+  return l;
+});
+landmarkerPromise.catch(() => {});
+
 $('start').onclick = async () => {
   $('start').disabled = true;
   initAudio();
@@ -43,14 +54,15 @@ $('start').onclick = async () => {
     });
     video.srcObject = stream;
     await video.play();
-    $('start-msg').textContent = 'Загрузка модели…';
-    landmarker = landmarker || await createLandmarker();
     requestWakeLock();
     newSet();
     running = true;
     $('start-screen').hidden = true;
     requestAnimationFrame(loop);
+    await landmarkerPromise;
   } catch (e) {
+    running = false;
+    $('start-screen').hidden = false;
     $('start-msg').textContent = 'Ошибка: ' + (e.message || e);
     $('start').disabled = false;
   }
@@ -105,9 +117,13 @@ document.addEventListener('visibilitychange', () => {
 
 // ---------- подход ----------
 
+// Каждый подход начинается с отсчёта: встать в упор и поставить телефон по рамке.
+// Счётчик в это время уже крутится (прогревает медиану и «верх»), но повторы не засчитывает.
 function newSet() {
   counter = new DepthCounter(settings);
   history = [];
+  counting = false;
+  goAt = performance.now() + COUNTDOWN_MS;
   t0 = performance.now();
   log = {
     v: 1, app: APP_VERSION, started: new Date().toISOString(), ua: navigator.userAgent,
@@ -116,6 +132,22 @@ function newSet() {
     frames: [], events: [],
   };
   renderCount();
+}
+
+function tickCountdown(now) {
+  if (counting) return;
+  const left = Math.ceil((goAt - now) / 1000);
+  if (left > 0) {
+    $('count').textContent = left;
+    if (!landmarker) setStatus('Приготовься, модель грузится');
+    return;
+  }
+  if (!landmarker) { $('count').textContent = '…'; setStatus('Модель ещё грузится…'); return; }
+  counting = true;
+  counter.arm();
+  beep(0.4);
+  logEvent('go', { modelMs });
+  renderCount(true);
 }
 
 function logEvent(type, data = {}) {
@@ -127,7 +159,8 @@ function logEvent(type, data = {}) {
 function loop() {
   if (!running) return;
   requestAnimationFrame(loop);
-  if (video.readyState < 2 || video.currentTime === lastVideoTime) return;
+  tickCountdown(performance.now());
+  if (!landmarker || video.readyState < 2 || video.currentTime === lastVideoTime) return;
   lastVideoTime = video.currentTime;
   const now = performance.now();
   const res = landmarker.detectForVideo(video, now);
@@ -140,7 +173,8 @@ function loop() {
 }
 
 function processFrame(t, lm, W, H) {
-  const ev = counter.update(t, lm, W, H);
+  const r = counter.update(t, lm, W, H);
+  const ev = counting ? r : null;
   const last = counter.last;
   const d = last?.d ?? null;
   // Подсказку по расстоянию даём только в верхней точке: внизу плечи всегда шире.
@@ -158,9 +192,9 @@ function processFrame(t, lm, W, H) {
     showMsg('Трясучка на полшишки, бля');
     logEvent('half');
   }
-  setStatus(!lm ? 'Не вижу тебя' : !last?.ok ? 'Не вижу плечи' : d == null ? 'Встань в упор…'
+  setStatus(!lm ? 'Не вижу тебя' : last?.why === 'noshoulders' ? 'Не вижу плечи'
     : hint === 'far' ? '↕ Отодвинь телефон дальше от лица' : hint === 'near' ? '↕ Придвинь телефон ближе'
-    : counter.count === 0 ? 'Телефон стоит ок, погнали' : '');
+    : !counting ? 'Приготовься, встань в упор' : counter.count === 0 ? 'Телефон стоит ок, погнали' : '');
 
   if (log.frames.length < LOG_MAX_FRAMES) {
     log.frames.push({

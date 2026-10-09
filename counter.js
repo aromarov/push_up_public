@@ -17,6 +17,7 @@ export const DEFAULTS = {
   minRepMs: 300,    // повтор короче не засчитывается
   maxRepMs: 4000,   // «внизу» дольше — не повтор (встал, пошёл к телефону); у реальных 0.5–1.8 с
   maxBadMs: 700,    // мусор дольше этого внутри повтора — повтор не засчитывается
+  rescaleMs: 1000,  // ширина плеч вне коридора дольше этого — человек сдвинулся, считаем медиану заново
   emaAlpha: 0.5,
   topWindowMs: 10000, // окно, по которому ищем «верх» (p80)
   swWindowMs: 5000,   // окно медианы ширины плеч
@@ -34,7 +35,7 @@ export class DepthCounter {
     this.swBuf = []; this.hBuf = [];
     this.ema = null; this.state = 'up'; this.count = 0;
     this.pendingSince = null; this.downAt = null; this.maxD = 0;
-    this.badSince = null; this.badMs = 0;
+    this.badSince = null; this.badMs = 0; this.glitchSince = null;
     this.last = null; // последние вычисленные значения — для UI и лога
   }
 
@@ -47,8 +48,17 @@ export class DepthCounter {
     const ready = this.swBuf.length > 30;
     const m = ready ? median(this.swBuf.map((x) => x[1])) : sw;
     // Левое плечо в исходном кадре фронталки правее правого; наоборот — модель перепутала стороны.
-    if (l.x < r.x || sw < 1 || (ready && (sw < 0.7 * m || sw > 1.4 * m))) return this.bad(t, 'glitch', sw / W);
-    this.badSince = null;
+    if (l.x < r.x || sw < 1 || (ready && (sw < 0.7 * m || sw > 1.4 * m))) {
+      // Без этого медиана залипает на старом расстоянии (ставил телефон близко, потом отошёл),
+      // и все новые кадры навсегда считаются мусором.
+      this.glitchSince ??= t;
+      if (t - this.glitchSince > s.rescaleMs) {
+        this.swBuf = []; this.hBuf = []; this.ema = null;
+        this.state = 'up'; this.maxD = 0; this.glitchSince = null;
+      }
+      return this.bad(t, 'glitch', sw / W);
+    }
+    this.badSince = null; this.glitchSince = null;
 
     this.swBuf.push([t, sw]);
     while (t - this.swBuf[0][0] > s.swWindowMs) this.swBuf.shift();
@@ -87,6 +97,12 @@ export class DepthCounter {
     if (dur < s.minRepMs || dur > s.maxRepMs || depth > s.maxDepth || this.badMs > s.maxBadMs) return null;
     this.count++;
     return 'rep';
+  }
+
+  // Начало подхода после отсчёта: буферы (медиана, верх) сохраняем, счёт и состояние — с нуля.
+  arm() {
+    this.state = 'up'; this.count = 0; this.maxD = 0;
+    this.pendingSince = null; this.badMs = 0;
   }
 
   bad(t, why, sw = null) {
