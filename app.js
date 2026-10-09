@@ -1,7 +1,7 @@
 import { PoseLandmarker } from './vendor/mediapipe/vision_bundle.mjs';
 import { LOG_POINTS, DEFAULTS, FRAME_HINT, DepthCounter, frameHint } from './counter.js';
 
-const APP_VERSION = '0.2.1';
+const APP_VERSION = '0.2.2';
 const GRAPH_MS = 10000;
 const LOG_MAX_FRAMES = 30 * 60 * 20;
 
