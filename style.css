@@ -42,8 +42,6 @@ button.on { background: #1f6feb; }
 }
 .row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 .row button { flex: 1 1 auto; }
-.seg { display: flex; gap: 6px; }
-.seg button { flex: 1; }
 
 #debug {
   position: fixed; left: 0; right: 0; top: calc(env(safe-area-inset-top) + 140px);

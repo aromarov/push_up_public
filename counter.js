@@ -1,4 +1,4 @@
-// Чистая логика счёта: сигналы, калибровка, стейт-машина. Без DOM — переиспользуется в replay-скрипте.
+// Чистая логика счёта: сигнал, фильтр мусорных кадров, стейт-машина. Без DOM — переиспользуется в replay-скрипте.
 
 export const LOG_POINTS = {
   nose: 0, l_eye: 2, r_eye: 5, l_ear: 7, r_ear: 8,
@@ -6,96 +6,102 @@ export const LOG_POINTS = {
   l_knee: 25, r_knee: 26, l_ank: 27, r_ank: 28,
 };
 
+// Пороги в ширинах плеч. По логам 2026-10-09: чистый повтор 1.0–1.2, на коленях 0.8–1.0,
+// половинка 0.35–0.5, тряска головой ≤ 0.27, ложиться в позицию 1.5–2.0.
 export const DEFAULTS = {
-  downFrac: 0.35,   // ниже этой доли диапазона — «низ»
-  upFrac: 0.65,     // выше — «верх»
+  downDepth: 0.6,   // провал глубже — «низ»
+  upDepth: 0.25,    // вернулся выше — повтор засчитан
+  halfDepth: 0.3,   // провал 0.3…downDepth без «низа» — половинка
+  maxDepth: 1.6,    // глубже — не отжимание (лёг, встал, ушёл из кадра)
   dwellMs: 80,      // сколько держать за порогом, чтобы сменить состояние
-  minRepMs: 400,    // повтор короче не засчитывается
-  maxGapMs: 1000,   // дольше без позы — сбрасываем незавершённый переход
+  minRepMs: 300,    // повтор короче не засчитывается
+  maxBadMs: 700,    // мусор дольше этого внутри повтора — повтор не засчитывается
   emaAlpha: 0.5,
-  windowMs: 10000,  // окно автокалибровки
+  topWindowMs: 10000, // окно, по которому ищем «верх» (p80)
+  swWindowMs: 5000,   // окно медианы ширины плеч
   minVis: 0.5,
 };
 
-// Минимальный диапазон движения, чтобы считать калибровку валидной.
-export const MIN_RANGE = { a: 0.25, b: 0.15 };
+const median = (arr) => { const s = [...arr].sort((x, y) => x - y); return s[Math.floor(s.length / 2)]; };
 
-// Оба сигнала ориентированы так, что «верх» = большее значение.
-// a: высота середины плеч над низом кадра, в ширинах плеч.
-// b: обратный масштаб плеч (≈ расстояние до камеры), в ширинах плеч на ширину кадра.
-export function computeSignals(lm, W, H, minVis) {
-  const l = lm[LOG_POINTS.l_sh], r = lm[LOG_POINTS.r_sh];
-  if (!l || !r || l.visibility < minVis || r.visibility < minVis) return null;
-  const sw = Math.hypot((l.x - r.x) * W, (l.y - r.y) * H);
-  if (sw < 1) return null;
-  const midY = (l.y + r.y) / 2;
-  return { a: ((1 - midY) * H) / sw, b: W / sw };
-}
-
-export class Calibrator {
-  constructor(minRange) {
-    this.minRange = minRange;
-    this.buf = [];
-    this.auto = null;                       // { lo, hi }
-    this.manual = { top: null, bottom: null };
+// Вход — точки MediaPipe (координаты 0..1 исходного, не зеркального кадра).
+// Сигнал: высота середины плеч над низом кадра, делённая на МЕДИАНУ ширины плеч за 5 с.
+// Покадровая ширина в нижней точке схлопывается (лицо у камеры), поэтому на неё делить нельзя.
+export class DepthCounter {
+  constructor(s = DEFAULTS) {
+    this.s = s;
+    this.swBuf = []; this.hBuf = [];
+    this.ema = null; this.state = 'up'; this.count = 0;
+    this.pendingSince = null; this.downAt = null; this.maxD = 0;
+    this.badSince = null; this.badMs = 0;
+    this.last = null; // последние вычисленные значения — для UI и лога
   }
 
-  push(t, v, windowMs) {
-    this.buf.push([t, v]);
-    while (this.buf.length && t - this.buf[0][0] > windowMs) this.buf.shift();
-    if (this.buf.length < 10) return;
-    const s = this.buf.map((p) => p[1]).sort((x, y) => x - y);
-    const lo = s[Math.floor(s.length * 0.05)];
-    const hi = s[Math.ceil(s.length * 0.95) - 1];
-    // Узкий диапазон (стоим на месте) не затирает прошлую калибровку.
-    if (hi - lo >= this.minRange) this.auto = { lo, hi };
-  }
+  // Возвращает 'rep', 'half' или null.
+  update(t, lm, W, H) {
+    const s = this.s;
+    const l = lm?.[LOG_POINTS.l_sh], r = lm?.[LOG_POINTS.r_sh];
+    if (!l || !r || l.visibility < s.minVis || r.visibility < s.minVis) return this.bad(t, 'noshoulders');
+    const sw = Math.hypot((l.x - r.x) * W, (l.y - r.y) * H);
+    const ready = this.swBuf.length > 30;
+    const m = ready ? median(this.swBuf.map((x) => x[1])) : sw;
+    // Левое плечо в исходном кадре фронталки правее правого; наоборот — модель перепутала стороны.
+    if (l.x < r.x || sw < 1 || (ready && (sw < 0.7 * m || sw > 1.4 * m))) return this.bad(t, 'glitch', sw / W);
+    this.badSince = null;
 
-  // Возвращает значения сигнала в нижней и верхней точке или null.
-  range(mode, invert) {
-    if (mode === 'manual') {
-      const { top, bottom } = this.manual;
-      return top != null && bottom != null && top !== bottom ? { down: bottom, up: top } : null;
+    this.swBuf.push([t, sw]);
+    while (t - this.swBuf[0][0] > s.swWindowMs) this.swBuf.shift();
+    const msw = median(this.swBuf.map((x) => x[1]));
+    const h = ((1 - (l.y + r.y) / 2) * H) / msw;
+    this.ema = this.ema == null ? h : this.ema + s.emaAlpha * (h - this.ema);
+    this.hBuf.push([t, this.ema]);
+    while (t - this.hBuf[0][0] > s.topWindowMs) this.hBuf.shift();
+    if (this.hBuf.length < 30) { this.last = { t, sw: sw / W, d: null, ok: true }; return null; }
+
+    const sorted = this.hBuf.map((x) => x[1]).sort((x, y) => x - y);
+    const d = sorted[Math.floor(sorted.length * 0.8)] - this.ema;
+    this.last = { t, sw: sw / W, d, ok: true };
+    this.maxD = Math.max(this.maxD, d);
+
+    const want = this.state === 'up' ? d > s.downDepth : d < s.upDepth;
+    if (!want) {
+      this.pendingSince = null;
+      if (this.state === 'up' && d < s.upDepth) {
+        const half = this.maxD >= s.halfDepth && this.maxD <= s.downDepth;
+        this.maxD = 0;
+        if (half) return 'half';
+      }
+      return null;
     }
-    if (!this.auto) return null;
-    const { lo, hi } = this.auto;
-    return invert ? { down: hi, up: lo } : { down: lo, up: hi };
-  }
-}
-
-// Прогресс 0 = низ, 1 = верх.
-export function progress(v, rng) {
-  return (v - rng.down) / (rng.up - rng.down);
-}
-
-export class RepCounter {
-  constructor() { this.reset(); }
-
-  reset() {
-    this.state = 'up';
-    this.count = 0;
-    this.pendingSince = null;
-    this.leftUpAt = null;
-    this.lastT = null;
-  }
-
-  // true, если на этом кадре засчитан повтор.
-  update(t, p, s) {
-    if (this.lastT != null && t - this.lastT > s.maxGapMs) this.pendingSince = null;
-    this.lastT = t;
-    const wantFlip = this.state === 'up' ? p < s.downFrac : p > s.upFrac;
-    if (!wantFlip) { this.pendingSince = null; return false; }
-    if (this.pendingSince == null) this.pendingSince = t;
-    if (t - this.pendingSince < s.dwellMs) return false;
+    this.pendingSince ??= t;
+    if (t - this.pendingSince < s.dwellMs) return null;
     this.pendingSince = null;
     if (this.state === 'up') {
-      this.state = 'down';
-      this.leftUpAt = t;
-      return false;
+      this.state = 'down'; this.downAt = t; this.badMs = 0;
+      return null;
     }
     this.state = 'up';
-    if (t - this.leftUpAt < s.minRepMs) return false;
+    const depth = this.maxD; this.maxD = 0;
+    if (t - this.downAt < s.minRepMs || depth > s.maxDepth || this.badMs > s.maxBadMs) return null;
     this.count++;
-    return true;
+    return 'rep';
   }
+
+  bad(t, why, sw = null) {
+    this.badSince ??= t;
+    if (this.state === 'down') this.badMs = Math.max(this.badMs, t - this.badSince);
+    this.pendingSince = null;
+    this.last = { t, sw, d: null, ok: false, why };
+    return null;
+  }
+}
+
+// Подсказка, как поставить телефон. Цель — гипотеза: в верхней точке плечи 25–38% ширины кадра,
+// тогда в нижней лицо не упирается в камеру. По логам 2026-10-09 вверху было 38–50% — близко.
+export const FRAME_HINT = { minSw: 0.25, maxSw: 0.38 };
+export function frameHint(swFrac) {
+  if (swFrac == null) return null;
+  if (swFrac > FRAME_HINT.maxSw) return 'far';   // слишком близко — отодвинь
+  if (swFrac < FRAME_HINT.minSw) return 'near';  // слишком далеко — придвинь
+  return 'ok';
 }

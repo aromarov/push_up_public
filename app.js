@@ -1,9 +1,7 @@
 import { PoseLandmarker } from './vendor/mediapipe/vision_bundle.mjs';
-import {
-  LOG_POINTS, DEFAULTS, MIN_RANGE, computeSignals, Calibrator, RepCounter, progress,
-} from './counter.js';
+import { LOG_POINTS, DEFAULTS, FRAME_HINT, DepthCounter, frameHint } from './counter.js';
 
-const APP_VERSION = '0.1.0';
+const APP_VERSION = '0.2.0';
 const GRAPH_MS = 10000;
 const LOG_MAX_FRAMES = 30 * 60 * 20;
 
@@ -14,14 +12,13 @@ const graph = $('graph'), gctx = graph.getContext('2d');
 const settings = loadSettings();
 let landmarker = null, delegateUsed = null, audioCtx = null, wakeLock = null;
 let running = false, lastVideoTime = -1, t0 = 0;
-let cal, counter, ema, history, log;
-let fps = 0, fpsFrames = 0, fpsT = 0, lastSig = null, lastP = null;
-let calMode = 'auto';
+let counter, history, log, hint = null;
+let fps = 0, fpsFrames = 0, fpsT = 0;
 
 function loadSettings() {
   let saved = {};
   try { saved = JSON.parse(localStorage.getItem('pushup_settings') || '{}'); } catch {}
-  return { ...DEFAULTS, signal: 'a', invert: false, ...saved };
+  return { ...DEFAULTS, ...saved };
 }
 function saveSettings() {
   try { localStorage.setItem('pushup_settings', JSON.stringify(settings)); } catch {}
@@ -109,11 +106,8 @@ document.addEventListener('visibilitychange', () => {
 // ---------- подход ----------
 
 function newSet() {
-  cal = { a: new Calibrator(MIN_RANGE.a), b: new Calibrator(MIN_RANGE.b) };
-  counter = new RepCounter();
-  ema = { a: null, b: null };
+  counter = new DepthCounter(settings);
   history = [];
-  calMode = 'auto';
   t0 = performance.now();
   log = {
     v: 1, app: APP_VERSION, started: new Date().toISOString(), ua: navigator.userAgent,
@@ -122,7 +116,6 @@ function newSet() {
     frames: [], events: [],
   };
   renderCount();
-  renderControls();
 }
 
 function logEvent(type, data = {}) {
@@ -147,42 +140,30 @@ function loop() {
 }
 
 function processFrame(t, lm, W, H) {
-  const sig = lm ? computeSignals(lm, W, H, settings.minVis) : null;
-  lastSig = sig;
-  const k = settings.signal;
-  let p = null, rng = null, v = null, counted = false;
-
-  if (sig) {
-    for (const key of ['a', 'b']) {
-      ema[key] = ema[key] == null ? sig[key] : ema[key] + settings.emaAlpha * (sig[key] - ema[key]);
-      cal[key].push(t, ema[key], settings.windowMs);
-    }
-    v = ema[k];
-    rng = cal[k].range(calMode, settings.invert);
-    if (rng) {
-      p = progress(v, rng);
-      counted = counter.update(t, p, settings);
-    }
-  }
-  lastP = p;
-  history.push({ t, v, rng, st: counter.state });
+  const ev = counter.update(t, lm, W, H);
+  const last = counter.last;
+  const d = last?.d ?? null;
+  // Подсказку по расстоянию даём только в верхней точке: внизу плечи всегда шире.
+  if (last?.ok && (d == null || d < settings.upDepth)) hint = frameHint(last.sw);
+  history.push({ t, d, st: counter.state });
   while (history.length && t - history[0].t > GRAPH_MS) history.shift();
 
-  if (counted) {
+  if (ev === 'rep') {
     beep();
     renderCount(true);
     logEvent('rep', { n: counter.count });
+  } else if (ev === 'half') {
+    showMsg('Трясучка на полшишки, бля');
+    logEvent('half');
   }
-  setStatus(!lm ? 'Не вижу тебя' : !sig ? 'Не вижу плечи' : !rng
-    ? (calMode === 'auto' ? 'Калибровка: сделай повтор' : 'Ручная калибровка: задай верх и низ') : '');
+  setStatus(!lm ? 'Не вижу тебя' : !last?.ok ? 'Не вижу плечи' : d == null ? 'Встань в упор…'
+    : hint === 'far' ? 'Отодвинь телефон дальше от лица' : hint === 'near' ? 'Придвинь телефон ближе' : '');
 
   if (log.frames.length < LOG_MAX_FRAMES) {
     log.frames.push({
       t: Math.round(t),
-      a: sig ? r3(sig.a) : null,
-      b: sig ? r3(sig.b) : null,
-      p: p == null ? null : r3(p),
-      rng: rng ? [r3(rng.down), r3(rng.up)] : null,
+      d: d == null ? null : r3(d),
+      ok: last?.ok ? 1 : 0,
       st: counter.state === 'up' ? 'U' : 'D',
       n: counter.count,
       kp: lm ? Object.values(LOG_POINTS).map((i) => [r3(lm[i].x), r3(lm[i].y), r2(lm[i].visibility)]) : null,
@@ -199,6 +180,7 @@ function drawSkeleton(lm) {
   const W = video.videoWidth, H = video.videoHeight;
   if (overlay.width !== W || overlay.height !== H) { overlay.width = W; overlay.height = H; }
   octx.clearRect(0, 0, W, H);
+  drawFrameHint(W, H);
   if (!lm) return;
   octx.lineWidth = Math.max(2, W / 200);
   octx.strokeStyle = '#3fb950';
@@ -219,23 +201,28 @@ function drawSkeleton(lm) {
   }
 }
 
+// Рамка «плечи сюда» в верхней точке: ширина — середина целевого диапазона ширины плеч.
+function drawFrameHint(W, H) {
+  const w = W * (FRAME_HINT.minSw + FRAME_HINT.maxSw) / 2;
+  octx.save();
+  octx.setLineDash([W / 40, W / 60]);
+  octx.lineWidth = Math.max(2, W / 150);
+  octx.strokeStyle = hint === 'ok' ? 'rgba(63,185,80,.9)' : hint ? 'rgba(240,136,62,.9)' : 'rgba(255,255,255,.5)';
+  octx.strokeRect((W - w) / 2, H * 0.3, w, H * 0.3);
+  octx.restore();
+}
+
 function drawGraph(tNow) {
   const dpr = window.devicePixelRatio || 1;
   const W = graph.clientWidth * dpr, H = graph.clientHeight * dpr;
   if (graph.width !== W || graph.height !== H) { graph.width = W; graph.height = H; }
   gctx.clearRect(0, 0, W, H);
-  const pts = history.filter((h) => h.v != null);
+  const pts = history.filter((h) => h.d != null);
   if (pts.length < 2) return;
-  const last = history[history.length - 1].rng;
-  const thLines = last ? [
-    last.down + (last.up - last.down) * settings.downFrac,
-    last.down + (last.up - last.down) * settings.upFrac,
-  ] : [];
-  let lo = Math.min(...pts.map((h) => h.v), ...thLines);
-  let hi = Math.max(...pts.map((h) => h.v), ...thLines);
-  const pad = (hi - lo) * 0.1 || 0.1; lo -= pad; hi += pad;
+  const thLines = [settings.halfDepth, settings.downDepth, settings.upDepth];
+  const lo = -0.2, hi = Math.max(1.4, ...pts.map((h) => h.d));
   const x = (t) => W - ((tNow - t) / GRAPH_MS) * W;
-  const y = (v) => H - ((v - lo) / (hi - lo)) * H;
+  const y = (v) => ((v - lo) / (hi - lo)) * H; // глубина растёт вниз
 
   gctx.fillStyle = 'rgba(31,111,235,0.18)';
   for (const h of history) if (h.st === 'down') gctx.fillRect(x(h.t), 0, Math.max(1, W / 300), H);
@@ -243,7 +230,7 @@ function drawGraph(tNow) {
   gctx.setLineDash([6 * dpr, 4 * dpr]);
   gctx.lineWidth = dpr;
   thLines.forEach((v, i) => {
-    gctx.strokeStyle = i === 0 ? '#f0883e' : '#3fb950';
+    gctx.strokeStyle = ['#d29922', '#f0883e', '#3fb950'][i];
     gctx.beginPath(); gctx.moveTo(0, y(v)); gctx.lineTo(W, y(v)); gctx.stroke();
   });
   gctx.setLineDash([]);
@@ -252,20 +239,18 @@ function drawGraph(tNow) {
   gctx.beginPath();
   let started = false;
   for (const h of history) {
-    if (h.v == null) { started = false; continue; }
-    if (!started) { gctx.moveTo(x(h.t), y(h.v)); started = true; } else gctx.lineTo(x(h.t), y(h.v));
+    if (h.d == null) { started = false; continue; }
+    if (!started) { gctx.moveTo(x(h.t), y(h.d)); started = true; } else gctx.lineTo(x(h.t), y(h.d));
   }
   gctx.stroke();
 }
 
 function renderStats() {
-  const k = settings.signal;
-  const rng = cal[k].range(calMode, settings.invert);
+  const last = counter.last;
   $('debug-stats').textContent = [
     `v${APP_VERSION}  ${delegateUsed}  fps ${fps.toFixed(1)}  ${video.videoWidth}x${video.videoHeight}`,
-    `a ${fmt(lastSig?.a)}  b ${fmt(lastSig?.b)}  p ${fmt(lastP)}`,
-    `сигнал ${k}  ${counter.state.toUpperCase()}  калибр ${calMode}  ` +
-      (rng ? `низ ${fmt(rng.down)} верх ${fmt(rng.up)}` : 'нет'),
+    `глубина ${fmt(last?.d)}  ${counter.state.toUpperCase()}  ${last?.ok ? '' : 'мусор: ' + (last?.why || '')}`,
+    `плечи ${last?.sw == null ? '—' : Math.round(last.sw * 100) + '%'} кадра (цель ${FRAME_HINT.minSw * 100}–${FRAME_HINT.maxSw * 100}%)`,
     `кадров в логе ${log.frames.length}`,
   ].join('\n');
 }
@@ -280,11 +265,10 @@ function renderCount(flash = false) {
 // ---------- контролы ----------
 
 const SLIDERS = [
-  ['downFrac', 'порог низа', 0.05, 0.6, 0.01],
-  ['upFrac', 'порог верха', 0.4, 0.95, 0.01],
+  ['downDepth', 'низ, плеч', 0.3, 1.2, 0.05],
+  ['upDepth', 'верх, плеч', 0.05, 0.5, 0.05],
+  ['halfDepth', 'половинка, плеч', 0.1, 0.6, 0.05],
   ['dwellMs', 'dwell, мс', 0, 300, 10],
-  ['minRepMs', 'мин. повтор, мс', 100, 1500, 50],
-  ['emaAlpha', 'сглаживание α', 0.1, 1, 0.05],
 ];
 
 function buildSliders() {
@@ -303,59 +287,6 @@ function buildSliders() {
     input.onchange = () => logEvent('settings', { [key]: settings[key] });
     box.appendChild(row);
   }
-}
-
-function renderControls() {
-  document.querySelectorAll('#signal-switch button').forEach((b) =>
-    b.classList.toggle('on', b.dataset.signal === settings.signal));
-  $('invert').checked = settings.invert;
-  $('cal-auto').classList.toggle('on', calMode === 'auto');
-  $('cal-top').classList.toggle('on', calMode === 'manual' && cal?.[settings.signal].manual.top != null);
-  $('cal-bottom').classList.toggle('on', calMode === 'manual' && cal?.[settings.signal].manual.bottom != null);
-}
-
-document.querySelectorAll('#signal-switch button').forEach((b) => {
-  b.onclick = () => {
-    settings.signal = b.dataset.signal;
-    saveSettings();
-    if (counter) { counter.state = 'up'; counter.pendingSince = null; }
-    logEvent('settings', { signal: settings.signal });
-    renderControls();
-  };
-});
-
-$('invert').onchange = () => {
-  settings.invert = $('invert').checked;
-  saveSettings();
-  logEvent('settings', { invert: settings.invert });
-};
-
-$('cal-auto').onclick = () => { calMode = 'auto'; logEvent('cal', { mode: 'auto' }); renderControls(); };
-$('cal-top').onclick = () => captureManual('top');
-$('cal-bottom').onclick = () => captureManual('bottom');
-
-// Отсчёт 3 с, потом медиана сигнала за 0.5 с — для обоих сигналов сразу.
-function captureManual(which) {
-  if (!running) return;
-  const btn = which === 'top' ? $('cal-top') : $('cal-bottom');
-  const label = btn.textContent;
-  let left = 3;
-  btn.textContent = `${left}…`;
-  const timer = setInterval(() => {
-    left--;
-    if (left > 0) { btn.textContent = `${left}…`; return; }
-    clearInterval(timer);
-    const since = performance.now() - t0 - 500;
-    for (const key of ['a', 'b']) {
-      const vals = cal[key].buf.filter(([t]) => t >= since).map(([, v]) => v).sort((x, y) => x - y);
-      if (vals.length) cal[key].manual[which] = vals[Math.floor(vals.length / 2)];
-    }
-    calMode = 'manual';
-    beep(0.2);
-    btn.textContent = label;
-    logEvent('cal', { mode: 'manual', which, a: cal.a.manual[which], b: cal.b.manual[which] });
-    renderControls();
-  }, 1000);
 }
 
 $('new-set').onclick = () => { if (running) newSet(); };
@@ -397,4 +328,3 @@ $('share-log').onclick = async () => {
 };
 
 buildSliders();
-renderControls();
