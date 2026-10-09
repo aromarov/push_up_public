@@ -1,7 +1,7 @@
 import { PoseLandmarker } from './vendor/mediapipe/vision_bundle.mjs';
 import { LOG_POINTS, DEFAULTS, FRAME_HINT, DepthCounter, frameHint } from './counter.js';
 
-const APP_VERSION = '0.3.0';
+const APP_VERSION = '0.3.1';
 const COUNTDOWN_MS = 8000;
 const GRAPH_MS = 10000;
 const LOG_MAX_FRAMES = 30 * 60 * 20;
@@ -17,13 +17,17 @@ let counter, history, log, hint = null;
 let goAt = 0, counting = false, modelMs = null;
 let fps = 0, fpsFrames = 0, fpsT = 0;
 
+// v2: в старом ключе залип minRepMs 400 из v0.1 и резал быстрые повторы. Берём только известные ключи.
+const SETTINGS_KEY = 'pushup_settings_v2';
 function loadSettings() {
   let saved = {};
-  try { saved = JSON.parse(localStorage.getItem('pushup_settings') || '{}'); } catch {}
-  return { ...DEFAULTS, ...saved };
+  try { saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}'); } catch {}
+  const s = { ...DEFAULTS };
+  for (const k of Object.keys(DEFAULTS)) if (typeof saved[k] === 'number') s[k] = saved[k];
+  return s;
 }
 function saveSettings() {
-  try { localStorage.setItem('pushup_settings', JSON.stringify(settings)); } catch {}
+  try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch {}
 }
 
 let msgUntil = 0;
